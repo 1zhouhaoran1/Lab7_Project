@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<!-- ============================================================
+     Lab 7 - Calculator frontend (web service)
+     Served by nginx on container port 80.
+     The page never talks to "localhost": API calls use the
+     relative path /api/calc, which nginx forwards to the
+     compose service "backend" (see nginx.conf).
+     ============================================================ -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lab 7 Calculator</title>
+    <style>
+        body {
+            font-family: "Segoe UI", Arial, sans-serif;
+            background: #f0f4f8;
+            display: flex;
+            justify-content: center;
+            padding-top: 60px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
+            padding: 28px 36px;
+            width: 340px;
+            text-align: center;
+        }
+        h1 { font-size: 22px; margin-bottom: 4px; }
+        p.sub { color: #777; font-size: 12px; margin-top: 0; }
+        .row { display: flex; gap: 10px; margin: 14px 0; }
+        input {
+            width: 100%;
+            padding: 10px;
+            font-size: 18px;
+            text-align: center;
+            border: 1px solid #ccd5e0;
+            border-radius: 6px;
+        }
+        .ops { display: flex; gap: 8px; justify-content: center; margin-bottom: 14px; }
+        .ops button, #calcBtn {
+            font-size: 18px;
+            padding: 8px 14px;
+            border: none;
+            border-radius: 6px;
+            background: #e6ecf3;
+            cursor: pointer;
+        }
+        .ops button.active { background: #2f6fed; color: #fff; }
+        #calcBtn { background: #2f6fed; color: #fff; width: 100%; padding: 10px; }
+        #result {
+            margin-top: 16px;
+            font-size: 26px;
+            font-weight: 600;
+            color: #1a3b7a;
+            min-height: 34px;
+        }
+        #status { font-size: 12px; color: #888; margin-top: 8px; }
+        #status.err { color: #c0392b; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>Lab 7 Calculator</h1>
+    <p class="sub">web container &rarr; nginx &rarr; backend:8000</p>
+
+    <div class="row">
+        <input id="a" type="number" value="3">
+        <input id="b" type="number" value="5">
+    </div>
+
+    <div class="ops">
+        <button data-op="+" class="active">+</button>
+        <button data-op="-">&minus;</button>
+        <button data-op="*">&times;</button>
+        <button data-op="/">&divide;</button>
+    </div>
+
+    <button id="calcBtn">Calculate</button>
+
+    <div id="result">?</div>
+    <div id="status">ready</div>
+</div>
+
+<script>
+    let op = '+';
+    const statusEl = document.getElementById('status');
+    const resultEl = document.getElementById('result');
+
+    document.querySelectorAll('.ops button').forEach(btn => {
+        btn.onclick = () => {
+            document.querySelectorAll('.ops button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            op = btn.dataset.op;
+        };
+    });
+
+    // Relative URL on purpose: the browser only knows the web service,
+    // nginx resolves the internal service name "backend" (nginx.conf).
+    async function calculate() {
+        statusEl.textContent = 'calling backend...';
+        statusEl.classList.remove('err');
+        const a = document.getElementById('a').value;
+        const b = document.getElementById('b').value;
+        try {
+            const resp = await fetch(`/api/calc?a=${encodeURIComponent(a)}&op=${encodeURIComponent(op)}&b=${encodeURIComponent(b)}`);
+            const data = await resp.json();
+            if (!resp.ok) {
+                throw new Error(data.error || ('HTTP ' + resp.status));
+            }
+            resultEl.textContent = `${a} ${op} ${b} = ${data.result}`;
+            statusEl.textContent = 'backend responded with HTTP ' + resp.status;
+        } catch (e) {
+            resultEl.textContent = 'ERROR';
+            statusEl.textContent = e.message;
+            statusEl.classList.add('err');
+        }
+    }
+
+    document.getElementById('calcBtn').onclick = calculate;
+    // Also calculate when the user presses Enter in an input.
+    document.querySelectorAll('input').forEach(i => i.addEventListener('keyup', e => {
+        if (e.key === 'Enter') calculate();
+    }));
+</script>
+</body>
+</html>

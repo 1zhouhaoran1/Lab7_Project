@@ -1,0 +1,7 @@
+# .dockerignore - files that are NOT sent to the Docker build context
+.git
+.github
+target
+screenshots
+*.md
+*.log

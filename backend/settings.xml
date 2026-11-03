@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ============================================================
+     Lab 7 - Maven settings used during the backend Docker build.
+     Direct access to repo.maven.apache.org fails in this network
+     ("Remote host terminated the handshake"), so ALL central
+     requests are redirected to the Aliyun Maven mirror.
+     ============================================================ -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                              https://maven.apache.org/xsd/settings-1.0.0.xsd">
+    <mirrors>
+        <mirror>
+            <id>aliyun-central</id>
+            <name>Aliyun public mirror</name>
+            <!-- mirrorOf=central: only central is redirected, other repos stay -->
+            <mirrorOf>central</mirrorOf>
+            <url>https://maven.aliyun.com/repository/central</url>
+        </mirror>
+    </mirrors>
+</settings>

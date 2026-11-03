@@ -1,0 +1,42 @@
+# ============================================================
+# Lab 7 - Docker Compose file for the multi-container calculator
+# Services: backend (Java API, port 8000) + web (nginx, port 80)
+# Run: docker compose up --build
+# ============================================================
+services:
+
+  # --- backend: Java calculator HTTP API --------------------
+  backend:
+    # build: compile the image from the local Dockerfile
+    # (no pull from a registry for our own code).
+    build:
+      context: ./backend          # build context = backend/ directory
+      dockerfile: Dockerfile      # explicit, the default would also work
+    image: calculator-backend:lab7  # local tag of the built image
+    container_name: calc-backend
+    ports:
+      - "8000:8000"               # host 8000 -> container 8000 (API)
+    environment:
+      # Task 3.6 (optional): inject env vars into the container.
+      # ApiServer reads LOG_LEVEL and prints one line per request at DEBUG.
+      - LOG_LEVEL=DEBUG
+      - PORT=8000
+    restart: on-failure           # restart only when the process exits with an error
+
+  # --- web: static frontend + reverse proxy ------------------
+  web:
+    build:
+      context: ./web              # build context = web/ directory
+      dockerfile: Dockerfile
+    image: calculator-web:lab7
+    container_name: calc-web
+    ports:
+      - "8080:80"                 # host 8080 -> container 80 (nginx)
+    depends_on:
+      # web starts after backend has been started (ordering only,
+      # see Bug record: it does NOT wait for business readiness).
+      - backend
+    restart: on-failure
+    environment:
+      # Passed to the web container for debugging in docker compose logs.
+      - ENVIRONMENT=lab7

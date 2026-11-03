@@ -1,0 +1,12 @@
+# --- Lab 7 .gitignore ---
+# Maven build output (rebuilt in CI and in docker build)
+backend/target/
+
+# Local experiment evidence, zipped for the report instead of committed
+screenshots/
+
+# OS / editor noise
+Thumbs.db
+.DS_Store
+.idea/
+*.iml

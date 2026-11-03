@@ -1,0 +1,125 @@
+# ============================================================
+# Lab 5 + Lab 6 - CI pipeline for the calculator
+# Lab 5: compile + unit test on a JDK 17 / 21 matrix
+# Lab 6: additionally build the Docker image after tests pass
+# Triggered on every push to main and every pull request to main
+# ============================================================
+name: CI Calculator
+
+# --- Trigger rules -----------------------------------------
+on:
+  push:
+    branches: [ main ]          # run when code is pushed to main
+  pull_request:
+    branches: [ main ]          # run when a PR targets main
+
+# --- One job, executed on a JDK matrix (Lab5 bonus task) ---
+jobs:
+  build:
+    name: Build and test (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest      # runner environment: Ubuntu latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [ 17, 21 ]        # bonus: build on JDK 17 and JDK 21 in parallel
+
+    steps:
+      # 1. Get the source code of the repository
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # 2. Install a JDK that matches the local development environment (17)
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      # 3. Reuse the local Maven repository so repeated builds start faster
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      # 4. Compile every Java source file (sources moved to backend/ in Lab 7)
+      - name: Compile source code
+        run: mvn -B -f backend/pom.xml clean compile
+
+      # 5. Run all JUnit 5 test cases written in Lab 4
+      - name: Run JUnit 5 tests
+        run: mvn -B -f backend/pom.xml test
+
+  # ==========================================================
+  # Lab 6 - Build the Docker image after ALL test jobs passed.
+  # needs: build  -> this job only runs when the JDK 17/21
+  #        test matrix finished successfully (code -> test -> image)
+  # ==========================================================
+  docker:
+    name: Build Docker image
+    needs: build          # wait until every unit test job is green
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Get the source code (contains the Dockerfile)
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # 2. Create a Buildx builder for efficient, cache-aware builds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 3. Build the calculator BACKEND image from backend/Dockerfile
+      #    (Lab 7: the Dockerfile moved from the repo root to backend/).
+      #    push: false -> only build, do NOT push to Docker Hub in CI.
+      #    cache-from/to: reuse layers between runs to speed up builds.
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          load: true          # load the built image into the local daemon
+          tags: calculator-backend:lab7
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 4. Smoke test: run the freshly built image and check that the
+      #    calculator really works inside the container (6 + 7 = 13)
+      - name: Smoke test the container
+        run: |
+          docker run --rm calculator-backend:lab7 6 + 7 | grep -q "Result: 13"
+
+  # ==========================================================
+  # Lab 7 - Validate the multi-container setup.
+  # "docker compose build" parses docker-compose.yml and builds
+  # BOTH images (backend + web). This catches broken YAML and
+  # broken Dockerfiles before they reach the main branch.
+  # No long-running "compose up" in CI - build validation only.
+  # ==========================================================
+  compose:
+    name: Docker Compose build
+    needs: build          # run after the unit tests are green
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout gives the runner the complete repository
+      #    (backend/, web/, docker-compose.yml, workflow files).
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # 2. Validate the compose file syntax first (fails fast on bad YAML)
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      # 3. Build both service images: this proves the compose file,
+      #    both Dockerfiles and the build contexts are correct.
+      - name: Build all services
+        run: docker compose build --pull
+
+      # 4. Show what was built (evidence in the CI log)
+      - name: List built images
+        run: docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'

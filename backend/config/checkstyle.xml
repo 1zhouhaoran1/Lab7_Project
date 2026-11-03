@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+        "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<module name="Checker">
+    <property name="severity" value="warning"/>
+
+    <module name="TreeWalker">
+        <!-- Magic numbers are hard to understand and to maintain -->
+        <module name="MagicNumber"/>
+        <!-- Methods and constructors should have Javadoc -->
+        <module name="MissingJavadocMethod">
+            <property name="scope" value="public"/>
+            <property name="allowMissingPropertyJavadoc" value="true"/>
+        </module>
+        <!-- A switch statement should have a default label -->
+        <module name="MissingSwitchDefault"/>
+        <!-- Control flow structures must use braces -->
+        <module name="NeedBraces"/>
+        <!-- Empty catch blocks hide errors -->
+        <module name="EmptyCatchBlock"/>
+        <!-- == / != must not be used on boxed types -->
+        <module name="EqualsHashCode"/>
+        <!-- Duplicate string literals -->
+        <module name="MultipleStringLiterals"/>
+        <!-- Unused imports -->
+        <module name="UnusedImports"/>
+        <!-- Cyclomatic complexity -->
+        <module name="CyclomaticComplexity"/>
+    </module>
+</module>
