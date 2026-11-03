@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lab 7 - Multi-Container Application with Docker Compose</title>
+<style>
+body { font-family: Calibri, Arial, sans-serif; font-size: 11.5pt; line-height: 1.45; margin: 2.2cm; }
+h1 { font-size: 20pt; margin-bottom: 2pt; }
+h2 { font-size: 15pt; margin-top: 20pt; border-bottom: 1px solid #999; }
+h3 { font-size: 12.5pt; margin-top: 14pt; }
+p.meta { margin: 2pt 0; color: #333; }
+pre { font-family: Consolas, monospace; font-size: 8.5pt; background: #f4f4f4; border: 1px solid #ccc;
+      padding: 8px; white-space: pre-wrap; line-height: 1.25; }
+table { border-collapse: collapse; width: 100%; font-size: 10pt; }
+th, td { border: 1px solid #888; padding: 4px 6px; text-align: left; vertical-align: top; }
+th { background: #eaeaea; }
+img { width: 640px; border: 1px solid #bbb; }
+p.cap { font-size: 9.5pt; color: #444; font-style: italic; margin: 3pt 0 14pt 0; }
+</style>
+</head>
+<body>
+
+<p style="font-family: SimSun; font-size: 22pt; font-weight: bold; text-align: center; margin-bottom: 6pt;">
+Nanjing University of Information Science and Technology&nbsp;&nbsp;Laboratory (Internship) Report</p>
+<p style="font-family: SimSun; font-size: 10.5pt; font-weight: bold; text-align: left; margin-bottom: 4pt;">
+Experiment (Internship) Name&nbsp;&nbsp;Software Development Tools&nbsp;&nbsp;Lab 7: Multi-Container Application with Docker Compose&nbsp;&nbsp;&nbsp;&nbsp;Date&nbsp;&nbsp;2026-11-03&nbsp;&nbsp;Score&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Instructor</p>
+<p style="font-family: SimSun; font-size: 10.5pt; font-weight: bold; text-align: left; margin-bottom: 4pt;">
+College&nbsp;&nbsp;&nbsp;&nbsp;Waterford&nbsp;&nbsp;&nbsp;&nbsp;Major&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Grade&nbsp;&nbsp;Class&nbsp;&nbsp;&nbsp;&nbsp;Name&nbsp;&nbsp;Zhou Haoran&nbsp;&nbsp;Student ID&nbsp;&nbsp;202583930032</p>
+<p style="font-family: Times New Roman; font-size: 10.5pt; font-weight: bold; text-align: left; margin-bottom: 14pt;">
+Software Development Tools&nbsp;&nbsp;|&nbsp;&nbsp;Lab 7&nbsp;&nbsp;|&nbsp;&nbsp;Zhou Haoran&nbsp;&nbsp;|&nbsp;&nbsp;202583930032&nbsp;&nbsp;|&nbsp;&nbsp;2026-11-03</p>
+
+<h2 style="font-size: 14pt; font-weight: bold; margin-top: 14pt; border-bottom: 1px solid #999;">1. Abstract</h2>
+<p>In this lab I split the containerized calculator of Lab 6 into a real multi-container application. The
+single image became two independent services: <b>backend</b>, a Java HTTP API built from the Lab 3-6
+calculator code and listening on port 8000, and <b>web</b>, an nginx server that serves the static frontend
+and reverse-proxies API calls to the backend. Both services have their own Dockerfile, and a commented
+docker-compose.yml declares the two services, their build contexts, the port mappings 8000:8000 and
+8080:80, the depends_on relationship, a restart: on-failure policy and LOG_LEVEL / PORT environment
+variables. The stack was verified end to end in the browser at http://127.0.0.1:8080, and the GitHub
+Actions workflow from Lab 5/6 was extended with a new job that validates docker-compose.yml and runs
+docker compose build as a CI gate. The hardest part of the lab was network related: an unstable local
+proxy kept resetting TLS connections during image pulls and Maven downloads inside the container, so
+the build was made resilient with a Docker Hub mirror image and a retry loop (section 6.3).</p>
+
+<h2 style="font-size: 14pt; font-weight: bold; margin-top: 14pt; border-bottom: 1px solid #999;">2. Introduction</h2>
+<p>A single container is a good start, but real applications are usually assembled from several small
+services that each do one job. Docker Compose describes such an application in one YAML file: every
+service has a name, a build context or image, ports, environment variables and relationships to other
+services. On <b>docker compose up</b> Compose creates a dedicated bridge network, gives every service a
+DNS entry named after the service, and starts the containers in dependency order.</p>
+<p>The calculator project is a natural fit for this split. The calculation logic does not need to know
+anything about HTML, and the web server does not need a JDK. Splitting them means the frontend can be
+scaled or redeployed without rebuilding the Java image, the backend can be reached by other services
+later on, and each container ships only what it needs - the backend keeps the multi-stage Maven/JRE
+image from Lab 6, the web service is a 50 MB nginx image plus two files.</p>
+<p>The key networking rule of this lab: inside the Compose network a service must address the other
+service by its <b>service name</b> (backend), never by localhost - localhost inside a container is the
+container itself. The browser, however, runs on the host machine, where the name "backend" does not
+resolve at all, so the page only uses a relative path and lets nginx do the internal hop
+(section 4.5).</p>
+
+<h2 style="font-size: 14pt; font-weight: bold; margin-top: 14pt; border-bottom: 1px solid #999;">3. Environment</h2>
+<table>
+<tr><th>Item</th><th>Version / Detail</th></tr>
+<tr><td>Operating system</td><td>Microsoft Windows 11 Home (x64), WSL2 backend</td></tr>
+<tr><td>Docker</td><td>Docker Desktop 4.96.1, Docker Engine 29.9.2</td></tr>
+<tr><td>Docker Compose</td><td>Docker Compose v5.6.0 (docker compose plugin)</td></tr>
+<tr><td>JDK (local)</td><td>OpenJDK 17.0.16, Temurin 17 inside the build image</td></tr>
+<tr><td>Backend base images</td><td>maven:3.9-eclipse-temurin-17 (build), eclipse-temurin:17-jre-jammy (run)</td></tr>
+<tr><td>Web base image</td><td>nginx:1.27-alpine (Server header: nginx/1.27.5)</td></tr>
+<tr><td>CI runner</td><td>GitHub Actions, ubuntu-latest, Docker Buildx</td></tr>
+</table>
+
+<h2 style="font-size: 14pt; font-weight: bold; margin-top: 14pt; border-bottom: 1px solid #999;">4. Implementation</h2>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">4.1 Task 1 - Project restructuring</h3>
+<p>The Lab 6 repository (single folder "calculator") was reorganized into two service directories while
+keeping all existing code and tests:</p>
+<ul>
+<li><b>backend/</b> - pom.xml, config/checkstyle.xml, the complete src/ tree of the calculator
+(ApiServer.java added, Main.java extended), settings.xml, .dockerignore and the backend Dockerfile.</li>
+<li><b>web/</b> - index.html (frontend page), nginx.conf (reverse proxy) and the web Dockerfile.</li>
+<li>Repository root - docker-compose.yml, .github/workflows/ci-calculator.yml, BUGS.md, .gitignore.</li>
+</ul>
+<img src="file:///C:/Users/baizh/Desktop/Lab7_Project/report_figures/fig1_structure.jpeg">
+<p class="cap">Figure 1: Repository directory structure after Task 1 - backend/ and web/ directories
+with their own Dockerfiles, docker-compose.yml at the repository root.</p>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">4.2 Task 2 - backend/Dockerfile (full source, commented)</h3>
+<pre># ============================================================
+# Lab 7 - Dockerfile for the BACKEND service (calculator API)
+# Two-stage build, same strategy as Lab 6:
+#   Stage 1 (build): Maven + JDK compiles the jar
+#   Stage 2 (run)  : lightweight JRE image only runs the jar
+# Build context: ./backend  (see docker-compose.yml)
+# ============================================================
+
+# --- Stage 1: build -----------------------------------------
+# FROM: full image with Maven 3.9 and JDK 17, so mvn can run directly.
+FROM maven:3.9-eclipse-temurin-17 AS build
+
+# WORKDIR: working directory for every following COPY / RUN.
+WORKDIR /app
+
+# COPY: pom.xml first, so the dependency layer stays cached
+# as long as the pom does not change.
+COPY pom.xml .
+
+# COPY: Maven settings.xml that redirects "central" to the Aliyun mirror,
+# because direct access to repo.maven.apache.org is blocked in this network.
+COPY settings.xml /root/.m2/settings.xml
+
+# RUN: download all Maven dependencies into this layer (reused cache layer).
+# Retry loop: the Docker Desktop proxy in this network resets TLS connections
+# intermittently ("Remote host terminated the handshake"), so the command is
+# retried up to 40 times; every attempt keeps whatever was already downloaded
+# in /root/.m2, so each retry makes progress instead of starting from zero.
+RUN i=1; until mvn -B -U dependency:go-offline; do \
+        i=$((i+1)); \
+        if [ "$i" -gt 40 ]; then echo "dependency download failed 40 times"; exit 1; fi; \
+        echo "=== dependency:go-offline failed, retry $i/40 ==="; \
+        sleep 5; \
+    done
+
+# COPY: the Java sources, including ApiServer.java (HTTP API) and Main.java.
+COPY src ./src
+
+# RUN: compile + package. -DskipTests because CI already runs the tests
+# before the image build job starts.
+# Same retry loop as above (intermittent TLS resets through the proxy).
+RUN i=1; until mvn -B -U clean package -DskipTests; do \
+        i=$((i+1)); \
+        if [ "$i" -gt 40 ]; then echo "mvn package failed 40 times"; exit 1; fi; \
+        echo "=== mvn package failed, retry $i/40 ==="; \
+        sleep 5; \
+    done
+
+# --- Stage 2: runtime ---------------------------------------
+# FROM: small JRE-only image, no Maven and no sources shipped.
+FROM eclipse-temurin:17-jre-jammy
+
+# WORKDIR: working directory of the final image.
+WORKDIR /app
+
+# COPY --from=build: take ONLY the packaged jar out of stage 1.
+COPY --from=build /app/target/calculator-1.0.0.jar calculator.jar
+
+# EXPOSE: documents that the API listens on port 8000
+# (compose maps host 8000 -&gt; container 8000).
+EXPOSE 8000
+
+# PORT / LOG_LEVEL: environment variables read by ApiServer;
+# values are injected in docker-compose.yml.
+ENV PORT=8000 \
+    LOG_LEVEL=INFO
+
+# ENTRYPOINT: fixed command of the container.
+ENTRYPOINT ["java", "-jar", "calculator.jar"]
+
+# CMD: default argument "server" starts the HTTP API instead of the CLI,
+# so "docker compose up" brings up the API on port 8000.
+CMD ["server"]</pre>
+<p>The Java side was extended minimally: ApiServer.java starts the JDK built-in
+com.sun.net.httpserver on $PORT, exposes GET /health and GET /calc?a=..&amp;op=..&amp;b=.. returning JSON,
+adds the CORS headers, and logs one line per request when LOG_LEVEL=DEBUG. Main.java gained a
+"server" mode that calls ApiServer.start(port); the Lab 3-6 CLI behaviour and all unit tests are
+unchanged.</p>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">4.3 Task 2 - web/Dockerfile (full source, commented)</h3>
+<pre># ============================================================
+# Lab 7 - Dockerfile for the WEB service (static frontend)
+# Single stage: the official nginx image already contains a web
+# server, we only drop in our page and our proxy configuration.
+# Build context: ./web  (see docker-compose.yml)
+# ============================================================
+
+# FROM: official nginx image, runs the web server on port 80.
+FROM nginx:1.27-alpine
+
+# WORKDIR: not strictly required, kept for readability.
+WORKDIR /usr/share/nginx/html
+
+# COPY: our reverse-proxy config replaces the default nginx site.
+# It forwards /api/ to the compose service name "backend" (port 8000).
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# COPY: the static calculator page served at http://127.0.0.1:8080.
+COPY index.html /usr/share/nginx/html/index.html
+
+# EXPOSE: documents container port 80; compose maps host 8080 -&gt; 80.
+EXPOSE 80
+
+# CMD: inherited from the nginx base image (nginx -g 'daemon off;'),
+# so no override is needed here.</pre>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">4.4 Task 3 - docker-compose.yml (full source, commented)</h3>
+<pre># ============================================================
+# Lab 7 - Docker Compose file for the multi-container calculator
+# Services: backend (Java API, port 8000) + web (nginx, port 80)
+# Run: docker compose up --build
+# ============================================================
+services:
+
+  # --- backend: Java calculator HTTP API --------------------
+  backend:
+    # build: compile the image from the local Dockerfile
+    # (no pull from a registry for our own code).
+    build:
+      context: ./backend          # build context = backend/ directory
+      dockerfile: Dockerfile      # explicit, the default would also work
+    image: calculator-backend:lab7  # local tag of the built image
+    container_name: calc-backend
+    ports:
+      - "8000:8000"               # host 8000 -&gt; container 8000 (API)
+    environment:
+      # Task 3.6 (optional): inject env vars into the container.
+      # ApiServer reads LOG_LEVEL and prints one line per request at DEBUG.
+      - LOG_LEVEL=DEBUG
+      - PORT=8000
+    restart: on-failure           # restart only when the process exits with an error
+
+  # --- web: static frontend + reverse proxy ------------------
+  web:
+    build:
+      context: ./web              # build context = web/ directory
+      dockerfile: Dockerfile
+    image: calculator-web:lab7
+    container_name: calc-web
+    ports:
+      - "8080:80"                 # host 8080 -&gt; container 80 (nginx)
+    depends_on:
+      # web starts after backend has been started (ordering only,
+      # see Bug record: it does NOT wait for business readiness).
+      - backend
+    restart: on-failure
+    environment:
+      # Passed to the web container for debugging in docker compose logs.
+      - ENVIRONMENT=lab7</pre>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">4.5 Task 2/3 - Cross-service addressing with the service name</h3>
+<p>The frontend must not write localhost for the backend. The problem is that there are two networks to
+think about: the browser runs on the host, the containers run inside the Compose bridge network where
+only the service name "backend" resolves. The solution used here has three parts:</p>
+<pre>/* index.html - browser side: a relative path, no host at all */
+const resp = await fetch(`/api/calc?a=${a}&amp;op=${op}&amp;b=${b}`);</pre>
+<pre># nginx.conf - inside the "web" container: the service name "backend"
+location /api/ {
+    proxy_pass http://backend:8000/;   # /api/calc -&gt; http://backend:8000/calc
+}</pre>
+<ul>
+<li>The browser stays on http://127.0.0.1:8080 - no CORS, no DNS problem, no localhost for the API.</li>
+<li>nginx resolves <b>backend</b> through Compose's embedded DNS - exactly the required service-name
+communication, and it fails fast with "host not found in upstream" if the backend does not exist.</li>
+<li>Backend port 8000 is still published for direct testing (Figure 4 / Table 1), while the page only
+needs the published 8080.</li>
+</ul>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">4.6 Task 5 - Extended GitHub Actions workflow</h3>
+<p>The Lab 5/6 jobs (JDK 17/21 test matrix, then Docker image build + smoke test) were kept and only
+adjusted for the new layout (mvn -f backend/pom.xml, context ./backend), because the Dockerfile moved
+into the backend directory. A third job was added:</p>
+<pre>  # ==========================================================
+  # Lab 7 - Validate the multi-container setup.
+  # "docker compose build" parses docker-compose.yml and builds
+  # BOTH images (backend + web). This catches broken YAML and
+  # broken Dockerfiles before they reach the main branch.
+  # No long-running "compose up" in CI - build validation only.
+  # ==========================================================
+  compose:
+    name: Docker Compose build
+    needs: build          # run after the unit tests are green
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout gives the runner the complete repository
+      #    (backend/, web/, docker-compose.yml, workflow files).
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # 2. Validate the compose file syntax first (fails fast on bad YAML)
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      # 3. Build both service images: this proves the compose file,
+      #    both Dockerfiles and the build contexts are correct.
+      - name: Build all services
+        run: docker compose build --pull
+
+      # 4. Show what was built (evidence in the CI log)
+      - name: List built images
+        run: docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}'</pre>
+<p>Key points: <b>actions/checkout@v4</b> pulls the complete repository first; <b>docker compose
+config --quiet</b> is a pure syntax check of the YAML; <b>docker compose build --pull</b> builds both
+service images so a broken compose file or Dockerfile can never reach main; CI does <b>not</b> keep the
+stack running, which avoids resource waste and port conflicts on the shared runner.</p>
+
+<h2 style="font-size: 14pt; font-weight: bold; margin-top: 14pt; border-bottom: 1px solid #999;">5. Experimental Results</h2>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">5.1 Starting the stack</h3>
+<p>Command: <b>docker compose up --build -d</b> - both images were built locally (build field, no image
+pull for our own code) and the default network lab7_project_default was created:</p>
+<img src="file:///C:/Users/baizh/Desktop/Lab7_Project/report_figures/fig2_compose_up.jpeg">
+<p class="cap">Figure 2: docker compose up --build -d - both images built, network created, calc-backend
+and calc-web started.</p>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">5.2 docker compose ps</h3>
+<img src="file:///C:/Users/baizh/Desktop/Lab7_Project/report_figures/fig3_compose_ps.jpeg">
+<p class="cap">Figure 3: docker compose ps - both containers Up with port mappings
+0.0.0.0:8000-&gt;8000/tcp (backend) and 0.0.0.0:8080-&gt;80/tcp (web).</p>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">5.3 docker compose logs</h3>
+<p>The logs prove the environment injection works: the backend runs with LOG_LEVEL=DEBUG from
+docker-compose.yml and prints one line per incoming request plus the computed result.</p>
+<img src="file:///C:/Users/baizh/Desktop/Lab7_Project/report_figures/fig4_compose_logs.jpeg">
+<p class="cap">Figure 4: docker compose logs - nginx startup of the web service, backend listening on
+8000, DEBUG request traces and results from the API tests.</p>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">5.4 API verification</h3>
+<p>Table 1: every endpoint was called twice - directly on the published backend port and through the
+nginx proxy of the web service.</p>
+<table>
+<tr><th>Command</th><th>Output</th><th>Verdict</th></tr>
+<tr><td>GET :8000/health</td><td>200 {"status":"up"}</td><td>PASS</td></tr>
+<tr><td>GET :8000/calc?a=6&amp;op=*&amp;b=7</td><td>{"a":6.0,"op":"*","b":7.0,"result":42}</td><td>PASS</td></tr>
+<tr><td>GET :8080/api/calc?a=20&amp;op=/&amp;b=4</td><td>{"result":5} (nginx -&gt; backend:8000)</td><td>PASS</td></tr>
+<tr><td>GET :8080/api/calc?a=10&amp;op=/&amp;b=0</td><td>400 {"error":"Division by zero"}</td><td>PASS</td></tr>
+<tr><td>GET :8080/ (frontend)</td><td>200, index.html 4487 bytes</td><td>PASS</td></tr>
+</table>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">5.5 End-to-end browser test</h3>
+<p>http://127.0.0.1:8080 opened the calculator page; two calculations were executed in the browser
+(3 + 5 = 8 and 20 / 4 = 5). Both responses show "backend responded with HTTP 200", and the browser
+console stayed free of errors, so the full chain browser -&gt; nginx(web) -&gt; backend:8000 works.</p>
+<img src="file:///C:/Users/baizh/Desktop/Lab7_Project/report_figures/fig5_browser_calc.jpeg">
+<p class="cap">Figure 5: Calculator page in the browser performing 20 / 4 = 5, status line "backend
+responded with HTTP 200" proves the frontend called the backend API successfully.</p>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">5.6 GitHub Actions pipeline</h3>
+<p>After pushing to main, every run now executes four jobs: "Build and test (JDK 17)", "Build and test
+(JDK 21)", "Build Docker image" (unchanged Lab 6 job, now pointing to backend/Dockerfile) and the new
+"Docker Compose build" job, which validates docker-compose.yml and builds both images.</p>
+<img src="file:///C:/Users/baizh/Desktop/Lab7_Project/report_figures/fig6_ci_pipeline.jpeg">
+<p class="cap">Figure 6: Green GitHub Actions run showing all four jobs passed: JDK 17 test, JDK 21 test,
+Docker image build, and Docker Compose build.</p>
+
+<h2 style="font-size: 14pt; font-weight: bold; margin-top: 14pt; border-bottom: 1px solid #999;">6. Discussion &amp; Analysis</h2>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">6.1 One container vs. two containers</h3>
+<table>
+<tr><th>Aspect</th><th>Lab 6: one container</th><th>Lab 7: two containers + Compose</th></tr>
+<tr><td>Responsibility</td><td>CLI, API and web serving mixed in one image</td><td>backend = computation only, web = serving only</td></tr>
+<tr><td>Image size</td><td>93 MB JRE image for everything</td><td>backend 93 MB + web ~50 MB, but each ships only what it needs</td></tr>
+<tr><td>Scaling</td><td>Scale everything together</td><td>Scale backend and web independently</td></tr>
+<tr><td>Networking</td><td>Only a single published port</td><td>Internal DNS by service name, published ports 8000/8080</td></tr>
+<tr><td>Redeployment</td><td>Rebuild one image for any change</td><td>Frontend changes never rebuild the Java image</td></tr>
+<tr><td>Startup</td><td>docker run with ad-hoc flags</td><td>One declarative docker-compose.yml, repeatable everywhere</td></tr>
+</table>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">6.2 Compose concepts used in this lab</h3>
+<ul>
+<li><b>services / build:</b> both images are built from local contexts (./backend, ./web), so the whole
+stack is reproducible from the repository alone.</li>
+<li><b>Service-name networking:</b> Compose creates one bridge network and registers each service name
+as a hostname. nginx uses http://backend:8000; the actual container IP is never hard-coded, so it can
+change freely on recreation.</li>
+<li><b>depends_on:</b> guarantees ordering only - web is created after backend is started, but it does
+<b>not</b> wait for the API to be ready to accept connections. For a real deployment a healthcheck
+(backend /health endpoint) plus condition: service_healthy would be the next step.</li>
+<li><b>restart: on-failure:</b> a crashed process is restarted automatically, but healthy services are
+not restarted in a loop - appropriate for a lab, unlike restart: always.</li>
+<li><b>environment:</b> LOG_LEVEL=DEBUG is injected into the backend container and is directly visible
+in docker compose logs (Figure 4), which demonstrates out-of-band configuration without rebuilding
+the image.</li>
+</ul>
+
+<h3 style="font-size: 12.5pt; font-weight: bold; margin-top: 14pt;">6.3 Problems, debugging and fixes</h3>
+<p><b>Problem 1: docker compose build cannot pull the nginx base image.</b><br>
+Symptom: "failed to resolve source metadata for docker.io/library/nginx:1.27-alpine ... connecting via
+app settings HTTPS proxy socks5://127.0.0.1:10808: connection refused".<br>
+Diagnosis: the error names the proxy, and port 10808 was not listening - v2rayN was not running. After
+starting it the error changed to TLS timeouts; curl through the proxy answered baidu (200) but failed
+on google/auth.docker.io/registry-1.docker.io, so the proxy node itself was unstable. A DNS check
+returned 31.13.86.21 (a Facebook IP) for auth.docker.io, confirming DNS poisoning - a proxy-less pull
+could not work either.<br>
+Fix: start the proxy and switch to a working node (verified with curl returning 204 for
+google.com/generate_204); as a stable fallback the base image was pre-pulled from a Chinese mirror and
+tagged as the official name: docker pull docker.1ms.run/library/nginx:1.27-alpine &amp;&amp; docker tag
+... nginx:1.27-alpine. CI on GitHub runners is unaffected.</p>
+
+<p><b>Problem 2: Maven downloads inside the backend build fail with TLS resets.</b><br>
+Symptom: "Could not transfer artifact ... Remote host terminated the handshake"; the build died at
+RUN mvn dependency:go-offline.<br>
+Diagnosis: repo.maven.apache.org is blocked here, so backend/settings.xml redirected "central" to the
+Aliyun mirror. That was not enough - transfers still failed intermittently. An isolation test with the
+same URL, five attempts each: host direct 5/5 OK, host through the proxy 2/5 OK, inside a container
+2/5 OK. The container has no proxy environment variables, yet it fails exactly like a proxied
+connection, so Docker Desktop applies its "app settings proxy" transparently to container traffic and
+the unstable node resets TLS handshakes. Container DNS and the route table were verified as
+correct.<br>
+Fix: (1) keep the Aliyun mirror (backend/settings.xml copied to /root/.m2/settings.xml), (2) wrap both
+mvn commands in a retry loop of up to 40 attempts - every attempt keeps the artifacts already
+downloaded in /root/.m2, so the log shows the number of missing artifacts shrinking each round
+(30+ -&gt; 1 -&gt; success). The final docker compose up --build completed with exit code 0.</p>
+
+<p><b>Problem 3: starting the API locally failed with "could not find main method".</b><br>
+Symptom: java -cp ... calculator.ApiServer returned "错误: 在类 calculator.ApiServer 中找不到 main
+方法".<br>
+Diagnosis: ApiServer only exposes start(int port); the main method lives in Main, which got the new
+"server" mode. The command used the wrong class.<br>
+Fix: start it with java -cp ... calculator.Main server; the backend Dockerfile does the same through
+CMD ["server"] appended to the ENTRYPOINT.</p>
+
+<p><b>Design note (the classic trap of this lab):</b> the frontend never addresses the backend with
+localhost. localhost in a container is the container itself, and the DNS name "backend" does not exist
+on the host, so a browser fetch to http://backend:8000 would fail with ERR_NAME_NOT_RESOLVED. The page
+therefore uses the relative path /api/calc and nginx (inside the compose network) performs the hop to
+http://backend:8000 - the service name is used exactly where it resolves.</p>
+
+<h2 style="font-size: 14pt; font-weight: bold; margin-top: 14pt; border-bottom: 1px solid #999;">7. Conclusion</h2>
+<p>This lab turned the calculator from a single container into a small distributed system. I learned how
+Compose declares services, build contexts, port mappings, dependency ordering, restart policies and
+environment variables in one file; how a service name becomes a DNS entry inside the Compose network;
+and why a frontend must never hard-code localhost for another service. The practical verification - up,
+ps, logs, direct API calls and two calculations in the browser - shows the whole chain working: browser
+-&gt; 8080 -&gt; nginx (web) -&gt; backend:8000 -&gt; JVM calculator.</p>
+<p>The main limitation discovered was environmental: an unstable local proxy sat transparently in front
+of container traffic and broke image pulls and Maven downloads. The fixes (mirror image, Aliyun Maven
+mirror, retry loops) make the build resilient but also show what a production setup should do instead:
+use a stable registry cache/mirror, an internal artifact repository, and a healthcheck-based
+depends_on so that "started" really means "ready". The next steps would be adding a healthcheck to the
+backend service, letting CI run docker compose up plus a curl smoke test, and pushing the images of both
+services to a registry from CI.</p>
+
+<h2 style="font-size: 14pt; font-weight: bold; margin-top: 14pt; border-bottom: 1px solid #999;">8. Appendix</h2>
+<p>
+- GitHub repository: https://github.com/1zhouhaoran1/Lab7_Project<br>
+- Repository layout: /backend (Dockerfile, pom.xml, settings.xml, src/), /web (Dockerfile, index.html,
+nginx.conf), /docker-compose.yml, /.github/workflows/ci-calculator.yml<br>
+- Bug record: /BUGS.md in the repository (same content as section 6.3)<br>
+- Evidence screenshots: /report_figures (Figure 1-5) and /screenshots (raw compose up/ps/logs output
+and the browser capture)<br>
+- Local commands used: docker compose config --quiet, docker compose up --build -d, docker compose ps,
+docker compose logs, docker compose down
+</p>
+
+</body>
+</html>
