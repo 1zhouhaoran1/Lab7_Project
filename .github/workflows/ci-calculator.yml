@@ -1,7 +1,9 @@
 # ============================================================
-# Lab 5 + Lab 6 - CI pipeline for the calculator
+# Lab 5 + Lab 6 + Lab 7 - CI pipeline for the calculator
 # Lab 5: compile + unit test on a JDK 17 / 21 matrix
 # Lab 6: additionally build the Docker image after tests pass
+# Lab 7: additionally validate docker-compose.yml and build
+#         BOTH service images (backend + web)
 # Triggered on every push to main and every pull request to main
 # ============================================================
 name: CI Calculator
