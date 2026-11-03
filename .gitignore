@@ -4,6 +4,8 @@ backend/target/
 
 # Local experiment evidence, zipped for the report instead of committed
 screenshots/
+report_figures/
+report_lab7.html
 
 # OS / editor noise
 Thumbs.db
